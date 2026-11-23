@@ -8,7 +8,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 
-const CUES = { done: 'success', error: 'error', attention: 'attention' };
+// Every cue that makes sense as a status sound, in every Cuelume theme.
+// Files are named <theme>-<cue>.wav; the app picks one per state.
+const THEMES = ['default', 'mech', 'bubble', 'press'];
+const CUE_NAMES = ['success', 'ready', 'error', 'warning', 'attention', 'open', 'close', 'toggle', 'tap', 'select', 'navigate', 'loading', 'count'];
+const CUES = Object.fromEntries(THEMES.flatMap((t) => CUE_NAMES.map((c) => [`${t}-${c}`, { cue: c, theme: t }])));
 const OUT = path.resolve('assets/sounds');
 const ROOT = path.resolve('node_modules/cuelume/dist');
 
@@ -29,19 +33,19 @@ const base = `http://127.0.0.1:${server.address().port}`;
 const browser = await chromium.launch({ channel: 'chrome' });
 fs.mkdirSync(OUT, { recursive: true });
 
-for (const [state, cue] of Object.entries(CUES)) {
+for (const [state, { cue, theme }] of Object.entries(CUES)) {
   // fresh page per cue: cuelume keeps one AudioContext per page
   const page = await browser.newPage();
   await page.goto(base + '/');
   const b64 = await page.evaluate(
-    async ({ base, cue, state }) => {
+    async ({ base, cue, state, theme }) => {
       const rate = 48000;
       const ctx = new OfflineAudioContext(2, rate * 2, rate);
       Object.defineProperty(ctx, 'state', { get: () => 'running' });
       window.AudioContext = function () { return ctx; };
       // fresh module instance per cue, so it picks up this context
       const { play } = await import(`${base}/index.js?${state}`);
-      play(cue, { emphasis: 'normal' });
+      play(cue, { emphasis: 'normal', theme });
       const buf = await ctx.startRendering();
 
       // trim trailing silence, encode 16-bit PCM WAV
@@ -64,12 +68,13 @@ for (const [state, cue] of Object.entries(CUES)) {
       new Uint8Array(view.buffer).forEach((b) => (s += String.fromCharCode(b)));
       return btoa(s);
     },
-    { base, cue, state },
+    { base, cue, state, theme },
   );
   await page.close();
   const file = path.join(OUT, `${state}.wav`);
   fs.writeFileSync(file, Buffer.from(b64, 'base64'));
-  console.log(`${cue} -> ${path.relative(process.cwd(), file)} (${fs.statSync(file).size} bytes)`);
+  if (fs.statSync(file).size < 1000) fs.unlinkSync(file);
+  else console.log(`${theme}/${cue} -> ${path.relative(process.cwd(), file)} (${fs.statSync(file).size} bytes)`);
 }
 
 await browser.close();

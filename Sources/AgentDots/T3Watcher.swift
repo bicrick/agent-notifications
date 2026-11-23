@@ -59,7 +59,7 @@ final class T3Watcher {
     }
 
     private func poll() {
-        guard t3Running else {
+        guard Prefs.shared.useT3, t3Running else {
             store.sync(prefix: "t3:", [], quiet: true)
             first = true
             return
@@ -90,7 +90,7 @@ final class T3Watcher {
             default: state = .idle; since = completed ?? since  // interrupted / cancelled
             }
             if pending > 0 && state == .working { state = .attention }
-            if (state == .done || state == .error) && (settled || now.timeIntervalSince(since) > keepFinished) {
+            if (state == .done || state == .error) && (settled || now.timeIntervalSince(since) > Double(Prefs.shared.keepFinishedMinutes) * 60) {
                 state = .idle
             }
 

@@ -14,13 +14,16 @@ enum AgentState: String, Codable {
         }
     }
 
-    var color: NSColor {
+    @MainActor var color: NSColor { Prefs.shared.color(self) }
+
+    /// Higher is more urgent; used to order the rail and pick the menu bar tint.
+    var urgency: Int {
         switch self {
-        case .working: NSColor(srgbRed: 0.38, green: 0.65, blue: 1.0, alpha: 1)
-        case .done: NSColor(srgbRed: 0.20, green: 0.83, blue: 0.60, alpha: 1)
-        case .error: NSColor(srgbRed: 1.0, green: 0.42, blue: 0.42, alpha: 1)
-        case .attention: NSColor(srgbRed: 1.0, green: 0.75, blue: 0.14, alpha: 1)
-        case .idle: NSColor(white: 0.55, alpha: 1)
+        case .attention: 4
+        case .error: 3
+        case .working: 2
+        case .done: 1
+        case .idle: 0
         }
     }
 
@@ -152,19 +155,27 @@ final class Store: ObservableObject {
             p.arguments = ["-a", app]
             try? p.run()
         }
-        if s.state.acknowledgeable {
-            dismissed[id] = s.since
-            if id.hasPrefix("t3:") {
-                if let i = sessions.firstIndex(where: { $0.id == id }) { sessions[i].state = .idle }
-            } else {
-                sessions.removeAll { $0.id == id }
-            }
+        if s.state.acknowledgeable { dismiss(id) }
+    }
+
+    /// Marks a finished session as seen: T3 threads go dormant, others leave the rail.
+    func dismiss(_ id: String) {
+        guard let s = sessions.first(where: { $0.id == id }) else { return }
+        dismissed[id] = s.since
+        if id.hasPrefix("t3:"), let i = sessions.firstIndex(where: { $0.id == id }) {
+            sessions[i].state = .idle
+        } else {
+            sessions.removeAll { $0.id == id }
         }
     }
 
     func prune() {
-        let cutoff = Date().addingTimeInterval(-Self.stale)
-        sessions.removeAll { $0.updated < cutoff }
+        let now = Date()
+        let keep = Double(Prefs.shared.keepFinishedMinutes) * 60
+        sessions.removeAll {
+            $0.updated < now.addingTimeInterval(-Self.stale)
+                || (!$0.id.hasPrefix("t3:") && $0.state.acknowledgeable && now.timeIntervalSince($0.since) > keep)
+        }
     }
 
     var json: Data {
@@ -173,38 +184,50 @@ final class Store: ObservableObject {
     }
 }
 
+@MainActor
 enum Sounds {
-    private static var cache: [AgentState: NSSound] = [:]
+    static let themes = ["default", "mech", "bubble", "press"]
+    static let cues = ["success", "ready", "attention", "warning", "error", "open", "close",
+                       "toggle", "select", "tap", "navigate", "loading", "count"]
+    private static var playing: [NSSound] = []
+
+    static func themeTitle(_ t: String) -> String {
+        ["default": "Glass", "mech": "Mechanical", "bubble": "Bubble", "press": "Press"][t] ?? t.capitalized
+    }
+    static func cueTitle(_ c: String) -> String {
+        ["success": "Success", "ready": "Ready", "attention": "Attention", "warning": "Warning", "error": "Error",
+         "open": "Open", "close": "Close", "toggle": "Toggle", "select": "Select", "tap": "Tap",
+         "navigate": "Navigate", "loading": "Loading", "count": "Count"][c] ?? c.capitalized
+    }
 
     /// Cuelume cues shipped in the app bundle's Resources (see scripts/render-cues.mjs).
-    static func url(_ state: AgentState) -> URL? {
-        let names: [AgentState: String] = [.done: "done", .error: "error", .attention: "attention"]
-        guard let name = names[state] else { return nil }
+    static func url(cue: String, theme: String) -> URL? {
+        let name = "\(theme)-\(cue)"
         if let u = Bundle.main.url(forResource: name, withExtension: "wav") { return u }
         let dev = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("../../assets/sounds/\(name).wav").standardized
-        return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
+        if FileManager.default.fileExists(atPath: dev.path) { return dev }
+        return theme == "default" ? nil : url(cue: cue, theme: "default")
     }
 
-    @MainActor
+    static func play(cue: String, theme: String? = nil) {
+        guard cue != "none", let url = url(cue: cue, theme: theme ?? Prefs.shared.soundTheme),
+              let snd = NSSound(contentsOf: url, byReference: true) else { return }
+        snd.volume = Float(Prefs.shared.volume)
+        playing.removeAll { !$0.isPlaying }
+        playing.append(snd)  // keep a reference until it finishes
+        snd.play()
+    }
+
     static func play(_ state: AgentState, muted: Bool) {
-        guard !muted, Prefs.shared.sound(state), let url = url(state) else { return }
-        let sound = cache[state] ?? NSSound(contentsOf: url, byReference: true)
-        cache[state] = sound
-        sound?.stop()
-        sound?.volume = Float(Prefs.shared.volume)
-        sound?.play()
+        guard !muted, !Prefs.shared.muted, let cue = Prefs.shared.cue(for: state) else { return }
+        play(cue: cue)
     }
 
-    @MainActor
     static func preview() {
-        for (i, s) in [AgentState.done, .attention, .error].enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.9) {
-                guard let url = url(s), let snd = NSSound(contentsOf: url, byReference: true) else { return }
-                snd.volume = Float(Prefs.shared.volume)
-                snd.play()
-                cache[s] = snd
-            }
+        let p = Prefs.shared
+        for (i, c) in [p.cueWorking, p.cueDone, p.cueAttention, p.cueError].filter({ $0 != "none" }).enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.9) { play(cue: c) }
         }
     }
 }

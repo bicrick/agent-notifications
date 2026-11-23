@@ -9,6 +9,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$HOME/.local/bin"
 cp .build/release/AgentDots "$APP/Contents/MacOS/agent-dots"
 cp assets/sounds/*.wav "$APP/Contents/Resources/"
+ICONSET="$(mktemp -d)/AppIcon.iconset"
+.build/release/AgentDots iconset "$ICONSET" >/dev/null
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -17,7 +20,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <key>CFBundleName</key><string>Agent Dots</string>
 <key>CFBundleExecutable</key><string>agent-dots</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSUIElement</key><true/>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict></plist>

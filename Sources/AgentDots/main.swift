@@ -52,6 +52,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         prefsObserver = Prefs.shared.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.place(open: self?.panelOpen ?? false) }
         }
+        // Menu bar tint, and the optional "still waiting" reminder.
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
 
         observer = store.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.place(open: self?.panelOpen ?? false) }
@@ -82,13 +86,32 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.invalidateShadow()
     }
 
+    private var lastReminder = Date()
+    private var lastUrgent: AgentState?
+
+    func tick() {
+        let urgent = store.sessions.map(\.state).max { $0.urgency < $1.urgency }
+        if urgent != lastUrgent {
+            lastUrgent = urgent
+            status?.button?.image = MenuIcon.image(urgent: urgent)
+        }
+        let every = Prefs.shared.remindEvery
+        let waiting = store.sessions.filter { $0.state == .attention }
+        if every > 0, let oldest = waiting.map(\.since).min(),
+           Date().timeIntervalSince(oldest) >= Double(every), Date().timeIntervalSince(lastReminder) >= Double(every) {
+            lastReminder = Date()
+            Sounds.play(.attention, muted: false)
+        }
+    }
+
     func setupMenu() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "circle.grid.3x3.fill", accessibilityDescription: "Agent Dots")
-        item.button?.image?.size = NSSize(width: 14, height: 14)
+        item.button?.image = MenuIcon.image(urgent: nil)
+        item.button?.setAccessibilityLabel("Agent Dots")
         let menu = NSMenu()
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(withTitle: "Mute for 1 Hour", action: #selector(toggleMute), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Clear Finished", action: #selector(clearFinished), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Agent Dots", action: #selector(quit), keyEquivalent: "q").target = self
         menu.delegate = self
@@ -99,14 +122,19 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openSettings() {
         if settingsWindow == nil {
             let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
-            w.title = "Agent Dots Settings"
-            w.styleMask = [.titled, .closable]
+            w.title = "Agent Dots"
+            w.styleMask = [.titled, .closable, .miniaturizable]
+            w.toolbarStyle = .preference
             w.isReleasedWhenClosed = false
             settingsWindow = w
         }
         settingsWindow?.center()
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func clearFinished() {
+        for s in store.sessions where s.state.acknowledgeable { store.dismiss(s.id) }
     }
 
     @objc func toggleMute() {
@@ -189,7 +217,18 @@ func snapshot(path: String, open: Bool, light: Bool) {
     print("wrote \(path)")
 }
 
-let args = Array(CommandLine.arguments.dropFirst())
+var args = Array(CommandLine.arguments.dropFirst())
+// Snapshot overrides: `agent-dots snapshot out.png 1 light markStyle=dot palette=vivid`
+// (kept in memory only, never saved to your settings).
+if args.first?.hasSuffix("snapshot") == true {
+    var overrides: [String: Any] = [:]
+    for a in args where a.contains("=") {
+        let kv = a.split(separator: "=", maxSplits: 1).map(String.init)
+        overrides[kv[0]] = Int(kv[1]).map { $0 as Any } ?? Double(kv[1]).map { $0 as Any } ?? kv[1]
+    }
+    args.removeAll { $0.contains("=") }
+    UserDefaults.standard.setVolatileDomain(overrides, forName: UserDefaults.argumentDomain)
+}
 switch args.first {
 case nil:
     let app = NSApplication.shared
@@ -205,6 +244,28 @@ case "set" where args.count >= 3:
                          app: args.count > 4 ? args[4] : Hook.hostApp()))
 case "demo":
     Hook.demo()
+case "iconset":
+    MainActor.assumeIsolated { renderIconset(to: args.count > 1 ? args[1] : "AppIcon.iconset") }
+case "settings-snapshot":
+    MainActor.assumeIsolated {
+        let tab = args.count > 2 ? args[2] : "appearance"
+        let view: AnyView = switch tab {
+        case "sounds": AnyView(SoundsTab())
+        case "sessions": AnyView(SessionsTab())
+        case "about": AnyView(AboutTab())
+        default: AnyView(AppearanceTab())
+        }
+        let host = NSHostingView(rootView: view.frame(width: 520).environment(\.colorScheme, .light))
+        host.frame = NSRect(x: 0, y: 0, width: 520, height: host.fittingSize.height)
+        let w = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: args[1]))
+        print("wrote \(args[1])")
+    }
 case "snapshot":
     MainActor.assumeIsolated {
         snapshot(path: args.count > 1 ? args[1] : "snapshot.png", open: (args.count > 2 ? args[2] : "1") != "0",
