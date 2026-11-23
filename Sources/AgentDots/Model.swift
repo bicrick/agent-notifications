@@ -186,11 +186,25 @@ enum Sounds {
         return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
     }
 
+    @MainActor
     static func play(_ state: AgentState, muted: Bool) {
-        guard !muted, let url = url(state) else { return }
+        guard !muted, Prefs.shared.sound(state), let url = url(state) else { return }
         let sound = cache[state] ?? NSSound(contentsOf: url, byReference: true)
         cache[state] = sound
         sound?.stop()
+        sound?.volume = Float(Prefs.shared.volume)
         sound?.play()
+    }
+
+    @MainActor
+    static func preview() {
+        for (i, s) in [AgentState.done, .attention, .error].enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.9) {
+                guard let url = url(s), let snd = NSSound(contentsOf: url, byReference: true) else { return }
+                snd.volume = Float(Prefs.shared.volume)
+                snd.play()
+                cache[s] = snd
+            }
+        }
     }
 }

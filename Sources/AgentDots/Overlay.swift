@@ -1,14 +1,20 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 enum Metrics {
-    static let railWidth: CGFloat = 14
-    static let panelWidth: CGFloat = 284
-    static let margin: CGFloat = 10          // room for the shadow inside the window
-    static let edgeInset: CGFloat = 6        // gap from the screen edge
-    static func rowHeight(_ open: Bool) -> CGFloat { open ? 44 : 24 }
-    static func padding(_ open: Bool) -> CGFloat { open ? 6 : 5 }
-    static func radius(_ open: Bool) -> CGFloat { open ? 18 : 7 }
+    static var p: Prefs { .shared }
+    static var k: CGFloat { CGFloat(p.scale) }
+    static var markWidth: CGFloat { CGFloat(p.markWidth) * k }
+    static var railWidth: CGFloat { markWidth + 10 * k }
+    static var panelWidth: CGFloat { CGFloat(p.panelWidth) * k }
+    /// Transparent room around the shape, so the window shadow isn't clipped.
+    static let margin: CGFloat = 2
+    static let edgeInset: CGFloat = 6
+    static func rowHeight(_ open: Bool) -> CGFloat { (open ? 44 : 24) * k }
+    static func markHeight(_ open: Bool) -> CGFloat { (open ? 22 : 16) * k }
+    static func padding(_ open: Bool) -> CGFloat { (open ? 6 : 5) * k }
+    static func radius(_ open: Bool) -> CGFloat { open ? 16 * k : railWidth / 2 }
     static func size(rows: Int, open: Bool) -> CGSize {
         let n = CGFloat(max(rows, 1))
         return CGSize(width: (open ? panelWidth : railWidth) + margin * 2,
@@ -27,23 +33,25 @@ final class UIState: ObservableObject {
 struct OverlayView: View {
     @ObservedObject var store: Store
     @ObservedObject var ui: UIState
+    @ObservedObject var prefs = Prefs.shared
     var onHover: (Bool) -> Void = { _ in }
 
     var body: some View {
         let open = ui.open
+        let leftEdge = prefs.edge == .left
         VStack(spacing: 0) {
             ForEach(Array(store.sessions.enumerated()), id: \.element.id) { i, s in
-                Row(session: s, open: open, last: i == store.sessions.count - 1) { store.activate(s.id) }
+                Row(session: s, open: open, leftEdge: leftEdge, last: i == store.sessions.count - 1) { store.activate(s.id) }
             }
             if store.sessions.isEmpty { Color.clear.frame(height: Metrics.rowHeight(open)) }
         }
         .padding(.vertical, Metrics.padding(open))
-        .frame(width: open ? Metrics.panelWidth : Metrics.railWidth, alignment: .trailing)
-        .glass(radius: Metrics.radius(open), snapshot: ui.snapshot)
+        .frame(width: open ? Metrics.panelWidth : Metrics.railWidth, alignment: leftEdge ? .leading : .trailing)
+        .surface(radius: Metrics.radius(open), style: prefs.style, snapshot: ui.snapshot)
         .contentShape(RoundedRectangle(cornerRadius: Metrics.radius(open), style: .continuous))
         .onHover(perform: onHover)
         .padding(Metrics.margin)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: leftEdge ? .topLeading : .topTrailing)
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: store.sessions.map(\.state))
     }
 }
@@ -53,44 +61,37 @@ struct OverlayView: View {
 struct Row: View {
     let session: Session
     let open: Bool
+    let leftEdge: Bool
     let last: Bool
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
-        HStack(spacing: 10) {
+        let k = Metrics.k
+        HStack(spacing: 10 * k) {
+            if leftEdge { mark }
             if open {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(session.parts.title)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                        meta(now: ctx.date)
-                    }
-                }
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .offset(x: 14)).animation(.easeOut(duration: 0.26).delay(0.06)),
+                text.transition(.asymmetric(
+                    insertion: .opacity.combined(with: .offset(x: (leftEdge ? -14 : 14) * k)).animation(.easeOut(duration: 0.26).delay(0.06)),
                     removal: .opacity.animation(.easeIn(duration: 0.1))))
                 Spacer(minLength: 0)
             }
-            Mark(state: session.state, height: open ? 22 : 16)
+            if !leftEdge { mark }
         }
-        .padding(.leading, open ? 14 : 0)
-        .padding(.trailing, open ? 12 : 5)
+        .padding(.leading, open ? (leftEdge ? 12 : 14) * k : (leftEdge ? (Metrics.railWidth - Metrics.markWidth) / 2 : 0))
+        .padding(.trailing, open ? (leftEdge ? 14 : 12) * k : (leftEdge ? 0 : (Metrics.railWidth - Metrics.markWidth) / 2))
         .frame(height: Metrics.rowHeight(open))
         .background {
             if open && hovered {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(.white.opacity(0.08))
-                    .padding(.horizontal, 5)
+                RoundedRectangle(cornerRadius: 10 * k, style: .continuous)
+                    .fill(.primary.opacity(0.08))
+                    .padding(.horizontal, 5 * k)
                     .padding(.vertical, 1)
             }
         }
         .overlay(alignment: .bottom) {
             if open && !last {
-                Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5).padding(.horizontal, 14)
+                Rectangle().fill(.primary.opacity(0.08)).frame(height: 0.5).padding(.horizontal, 14 * k)
             }
         }
         .contentShape(Rectangle())
@@ -99,12 +100,27 @@ struct Row: View {
         .help(session.label)
     }
 
+    private var mark: some View {
+        Mark(state: session.state, width: Metrics.markWidth, height: Metrics.markHeight(open))
+    }
+
+    private var text: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(session.parts.title)
+                .font(.system(size: 12.5 * Metrics.k, weight: .medium))
+                .foregroundStyle(session.state == .idle ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in meta(now: ctx.date) }
+        }
+    }
+
     private func meta(now: Date) -> some View {
-        var text = Text(session.state.title).foregroundColor(Color(nsColor: session.state.color))
+        var text = Text(session.state.title).foregroundColor(session.state == .idle ? .secondary : Color(nsColor: session.state.color))
         text = text + Text("  ·  \(ago(now.timeIntervalSince(session.since)))")
         if let d = session.detail { text = text + Text("  ·  \(d)") }
         return text
-            .font(.system(size: 10.5))
+            .font(.system(size: 10.5 * Metrics.k))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.tail)
@@ -117,7 +133,8 @@ func ago(_ t: TimeInterval) -> String {
     switch s {
     case ..<60: return "\(s)s"
     case ..<3600: return "\(s / 60)m"
-    default: return "\(s / 3600)h \(s / 60 % 60)m"
+    case ..<86400: return "\(s / 3600)h \(s / 60 % 60)m"
+    default: return "\(s / 86400)d"
     }
 }
 
@@ -128,6 +145,7 @@ func ago(_ t: TimeInterval) -> String {
 /// error = split in two, attention = breathing with a glow, idle = short and faint.
 struct Mark: View {
     let state: AgentState
+    let width: CGFloat
     let height: CGFloat
 
     var body: some View {
@@ -153,51 +171,74 @@ struct Mark: View {
                     VStack(spacing: 2) { Capsule().fill(c); Capsule().fill(c) }
                 case .attention:
                     let a = 0.55 + 0.45 * (0.5 + 0.5 * cos(t * 2 * .pi / 1.1))
-                    Capsule().fill(c.opacity(a)).shadow(color: c.opacity(0.8 * a), radius: 4)
+                    Capsule().fill(c.opacity(a)).shadow(color: c.opacity(0.7 * a), radius: 3)
                 case .idle:
-                    Capsule().fill(c.opacity(0.45)).frame(height: height * 0.4)
+                    Capsule().fill(Color.primary.opacity(0.28)).frame(height: height * 0.4)
                 }
             }
         }
-        .frame(width: 4, height: height)
+        .frame(width: width, height: height)
     }
 }
 
-// MARK: - Glass
+// MARK: - Surface
 
 extension View {
-    /// Liquid Glass on macOS 26+, the native behind-window blur before that.
-    /// Snapshots can't capture either, so they get a painted stand-in.
+    /// The rail's background. Glass is the native material, clipped by AppKit itself
+    /// (SwiftUI clipping doesn't apply to behind-window blur). The shadow is the
+    /// window's own, so it is never boxed in by the window bounds.
     @ViewBuilder
-    func glass(radius: CGFloat, snapshot: Bool) -> some View {
+    func surface(radius: CGFloat, style: Prefs.Style, snapshot: Bool) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        if snapshot {
-            self.background(shape.fill(Color(white: 0.14).opacity(0.82)))
-                .overlay(shape.strokeBorder(rim, lineWidth: 0.75))
-                .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-        } else if #available(macOS 26, *) {
-            self.glassEffect(.regular, in: shape)
-        } else {
-            self.background(BlurView().clipShape(shape))
-                .background(shape.fill(Color.black.opacity(0.18)))
-                .overlay(shape.strokeBorder(rim, lineWidth: 0.75))
-                .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+        switch style {
+        case .bare:
+            self
+        case .solid:
+            self.background(shape.fill(Color(nsColor: .windowBackgroundColor)))
+                .overlay(shape.strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
+        case .glass:
+            if snapshot {
+                self.background(shape.fill(.regularMaterial)).overlay(shape.strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
+            } else if #available(macOS 26, *) {
+                self.glassEffect(.regular, in: shape)
+            } else {
+                self.background(BlurView(radius: radius))
+                    .overlay(shape.strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
+            }
         }
-    }
-
-    private var rim: LinearGradient {
-        LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0.10), .white.opacity(0.16)],
-                       startPoint: .top, endPoint: .bottom)
     }
 }
 
 struct BlurView: NSViewRepresentable {
+    var radius: CGFloat
+
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
-        v.material = .hudWindow
+        v.material = .popover
         v.blendingMode = .behindWindow
         v.state = .active
+        v.wantsLayer = true
+        v.layer?.cornerCurve = .continuous
+        v.layer?.masksToBounds = true
         return v
     }
-    func updateNSView(_ v: NSVisualEffectView, context: Context) {}
+
+    func updateNSView(_ v: NSVisualEffectView, context: Context) {
+        v.layer?.cornerRadius = radius
+        v.maskImage = Self.mask(radius)
+        v.window?.invalidateShadow()
+    }
+
+    /// Behind-window blur only honours a mask image, not layer clipping on its own.
+    static func mask(_ r: CGFloat) -> NSImage {
+        let size = NSSize(width: r * 2 + 1, height: r * 2 + 1)
+        let img = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: r, yRadius: r).fill()
+            return true
+        }
+        img.capInsets = NSEdgeInsets(top: r, left: r, bottom: r, right: r)
+        img.resizingMode = .stretch
+        return img
+    }
 }

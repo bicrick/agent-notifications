@@ -103,7 +103,8 @@ final class T3Watcher {
         }
         // Live threads always show; dormant ones fill the rest, most recent first.
         let live = events.filter { $0.state != .idle }
-        let dormant = events.filter { $0.state == .idle }.prefix(max(0, Self.limit - live.count))
+        let limit = Prefs.shared.limit
+        let dormant = Prefs.shared.showDormant ? Array(events.filter { $0.state == .idle }.prefix(max(0, limit - live.count))) : []
         let shown = Set((live + dormant).map(\.session))
         store.sync(prefix: "t3:", events.filter { shown.contains($0.session) }, quiet: first)
         first = false

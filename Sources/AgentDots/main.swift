@@ -14,7 +14,7 @@ final class Panel: NSPanel {
 }
 
 @MainActor
-final class Controller: NSObject, NSApplicationDelegate {
+final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let store = Store()
     let ui = UIState()
     var panel: Panel!
@@ -23,12 +23,15 @@ final class Controller: NSObject, NSApplicationDelegate {
     var hovering = false
     var collapseWork: DispatchWorkItem?
     var observer: Any?
+    var prefsObserver: Any?
+    var status: NSStatusItem?
+    var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         panel = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        panel.hasShadow = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isMovable = false
@@ -45,6 +48,10 @@ final class Controller: NSObject, NSApplicationDelegate {
         }
 
         t3 = T3Watcher(store: store)
+        setupMenu()
+        prefsObserver = Prefs.shared.objectWillChange.sink { [weak self] in
+            DispatchQueue.main.async { self?.place(open: self?.panelOpen ?? false) }
+        }
 
         observer = store.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.place(open: self?.panelOpen ?? false) }
@@ -64,11 +71,56 @@ final class Controller: NSObject, NSApplicationDelegate {
     func place(open: Bool) {
         panelOpen = open
         guard let screen = NSScreen.main else { return }
+        let prefs = Prefs.shared
         let size = Metrics.size(rows: store.sessions.count, open: open)
         let f = screen.frame
-        let top = f.maxY - f.height * 0.35 + Metrics.margin
-        let x = f.maxX - size.width - Metrics.edgeInset + Metrics.margin
+        let top = f.maxY - f.height * prefs.position + Metrics.margin
+        let x = prefs.edge == .right
+            ? f.maxX - size.width - Metrics.edgeInset + Metrics.margin
+            : f.minX + Metrics.edgeInset - Metrics.margin
         panel.setFrame(NSRect(x: x, y: top - size.height, width: size.width, height: size.height), display: true)
+        panel.invalidateShadow()
+    }
+
+    func setupMenu() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "circle.grid.3x3.fill", accessibilityDescription: "Agent Dots")
+        item.button?.image?.size = NSSize(width: 14, height: 14)
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
+        menu.addItem(withTitle: "Mute for 1 Hour", action: #selector(toggleMute), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Agent Dots", action: #selector(quit), keyEquivalent: "q").target = self
+        menu.delegate = self
+        item.menu = menu
+        status = item
+    }
+
+    @objc func openSettings() {
+        if settingsWindow == nil {
+            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
+            w.title = "Agent Dots Settings"
+            w.styleMask = [.titled, .closable]
+            w.isReleasedWhenClosed = false
+            settingsWindow = w
+        }
+        settingsWindow?.center()
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func toggleMute() {
+        let p = Prefs.shared
+        p.mutedUntil = p.muted ? nil : Date().addingTimeInterval(3600)
+    }
+
+    @objc func quit() {
+        // KeepAlive would restart us; unload the login item first.
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = ["bootout", "gui/\(getuid())/dev.bicrick.agent-dots"]
+        try? p.run()
+        NSApp.terminate(nil)
     }
 
     /// Open: grow the window first, then let SwiftUI spring the panel out inside it.
@@ -93,8 +145,16 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 }
 
+extension Controller {
+    nonisolated func menuWillOpen(_ menu: NSMenu) {
+        MainActor.assumeIsolated {
+            menu.item(at: 1)?.title = Prefs.shared.muted ? "Unmute" : "Mute for 1 Hour"
+        }
+    }
+}
+
 @MainActor
-func snapshot(path: String, open: Bool) {
+func snapshot(path: String, open: Bool, light: Bool) {
     let store = Store()
     store.muted = true
     let samples: [(String, AgentState, String, String?)] = [
@@ -113,11 +173,13 @@ func snapshot(path: String, open: Bool) {
     ui.snapshot = true
     let size = Metrics.size(rows: samples.count, open: open)
     let view = ZStack {
-        LinearGradient(colors: [Color(white: 0.30), Color(red: 0.16, green: 0.18, blue: 0.24)], startPoint: .topLeading, endPoint: .bottomTrailing)
+        LinearGradient(colors: light ? [Color(white: 0.97), Color(red: 0.86, green: 0.89, blue: 0.95)]
+                                     : [Color(white: 0.30), Color(red: 0.16, green: 0.18, blue: 0.24)],
+                       startPoint: .topLeading, endPoint: .bottomTrailing)
         OverlayView(store: store, ui: ui).frame(width: size.width, height: size.height)
     }
     .frame(width: size.width + 60, height: size.height + 60)
-    .environment(\.colorScheme, .dark)
+    .environment(\.colorScheme, light ? .light : .dark)
 
     let r = ImageRenderer(content: view)
     r.scale = 2
@@ -145,7 +207,8 @@ case "demo":
     Hook.demo()
 case "snapshot":
     MainActor.assumeIsolated {
-        snapshot(path: args.count > 1 ? args[1] : "snapshot.png", open: (args.count > 2 ? args[2] : "1") != "0")
+        snapshot(path: args.count > 1 ? args[1] : "snapshot.png", open: (args.count > 2 ? args[2] : "1") != "0",
+                 light: args.count > 3 && args[3] == "light")
     }
 default:
     FileHandle.standardError.write(Data("usage: agent-dots [hook claude|hook codex <json>|set <session> <state> [label] [app]|demo|snapshot <out.png> [0|1]]\n".utf8))
