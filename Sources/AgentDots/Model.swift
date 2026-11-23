@@ -33,6 +33,10 @@ struct AgentEvent: Codable {
     var state: AgentState
     var label: String?
     var app: String?
+    /// Optional extras: project name, a URL that opens this exact session, and when the state began.
+    var project: String? = nil
+    var link: String? = nil
+    var since: Date? = nil
 }
 
 struct Session: Identifiable, Equatable {
@@ -40,6 +44,8 @@ struct Session: Identifiable, Equatable {
     var label: String
     var state: AgentState
     var app: String?
+    var project: String?
+    var link: String?
     var updated: Date
     var since: Date
 
@@ -53,6 +59,7 @@ struct Session: Identifiable, Equatable {
 
     var source: String? {
         let tool = parts.tool
+        if app == "T3 Code (Beta)", project != nil { return tool }
         let host = app?.replacingOccurrences(of: " (Beta)", with: "")
         switch (tool, host) {
         case let (t?, h?) where t == h: return "\(t) app"
@@ -62,6 +69,14 @@ struct Session: Identifiable, Equatable {
         default: return nil
         }
     }
+
+    var detail: String? {
+        [project, source].compactMap { $0 }.joined(separator: "  ·  ").nilIfEmpty
+    }
+}
+
+extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 @MainActor
@@ -70,37 +85,73 @@ final class Store: ObservableObject {
     var muted = false
     private static let stale: TimeInterval = 6 * 60 * 60
 
+    /// Sessions you clicked away, keyed by id, with the state start time they had.
+    /// They stay hidden until that session enters a new state.
+    private var dismissed: [String: Date] = [:]
+
     @discardableResult
-    func apply(_ ev: AgentEvent) -> Bool {
+    func apply(_ ev: AgentEvent, quiet: Bool = false) -> Bool {
         guard !ev.session.isEmpty else { return false }
+        // T3 threads come from T3Watcher; drop copies older plugins/hooks send for them.
+        if ev.app == "T3 Code (Beta)" && !ev.session.hasPrefix("t3:") {
+            sessions.removeAll { $0.id == ev.session }
+            return true
+        }
+        // A session that ended has nothing left to tell you.
+        if ev.state == .idle {
+            sessions.removeAll { $0.id == ev.session }
+            return true
+        }
         let now = Date()
         if let i = sessions.firstIndex(where: { $0.id == ev.session }) {
-            let changed = sessions[i].state != ev.state
-            sessions[i].state = ev.state
-            if let l = ev.label { sessions[i].label = l }
-            if let a = ev.app { sessions[i].app = a }
-            sessions[i].updated = now
-            if changed {
-                sessions[i].since = now
-                Sounds.play(ev.state, muted: muted)
-            }
+            var s = sessions[i]
+            let changed = s.state != ev.state
+            s.state = ev.state
+            if let l = ev.label { s.label = l }
+            if let a = ev.app { s.app = a }
+            if let p = ev.project { s.project = p }
+            if let l = ev.link { s.link = l }
+            s.updated = now
+            if let since = ev.since { s.since = since } else if changed { s.since = now }
+            if s != sessions[i] { sessions[i] = s }
+            if changed && !quiet { Sounds.play(ev.state, muted: muted) }
         } else {
+            let since = ev.since ?? now
+            if let d = dismissed[ev.session], abs(d.timeIntervalSince(since)) < 1 { return true }
+            dismissed[ev.session] = nil
             sessions.append(Session(id: ev.session, label: ev.label ?? ev.session, state: ev.state,
-                                    app: ev.app, updated: now, since: now))
-            Sounds.play(ev.state, muted: muted)
+                                    app: ev.app, project: ev.project, link: ev.link, updated: now, since: since))
+            if !quiet { Sounds.play(ev.state, muted: muted) }
         }
         return true
     }
 
+    /// Replaces every session whose id starts with `prefix` with `events` (a full snapshot
+    /// from a polled source); sessions missing from it are removed.
+    func sync(prefix: String, _ events: [AgentEvent], quiet: Bool) {
+        let ids = Set(events.map(\.session))
+        let stale = sessions.filter { $0.id.hasPrefix(prefix) && !ids.contains($0.id) }.map(\.id)
+        if !stale.isEmpty { sessions.removeAll { stale.contains($0.id) } }
+        for ev in events {
+            if let d = dismissed[ev.session], let since = ev.since, abs(d.timeIntervalSince(since)) < 1 { continue }
+            apply(ev, quiet: quiet)
+        }
+    }
+
     func activate(_ id: String) {
         guard let s = sessions.first(where: { $0.id == id }) else { return }
-        if let app = s.app {
+        if let link = s.link, let url = URL(string: link) {
+            NSWorkspace.shared.open(url)
+        } else if let app = s.app {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
             p.arguments = ["-a", app]
             try? p.run()
         }
-        if s.state.acknowledgeable { sessions.removeAll { $0.id == id } }
+        if s.state.acknowledgeable {
+            dismissed[id] = s.since
+            sessions.removeAll { $0.id == id }
+        }
     }
 
     func prune() {
@@ -109,7 +160,7 @@ final class Store: ObservableObject {
     }
 
     var json: Data {
-        let list = sessions.map { ["id": $0.id, "label": $0.label, "state": $0.state.rawValue, "app": $0.app ?? NSNull()] as [String: Any] }
+        let list = sessions.map { ["id": $0.id, "label": $0.label, "state": $0.state.rawValue, "app": $0.app ?? NSNull(), "project": $0.project ?? NSNull(), "link": $0.link ?? NSNull()] as [String: Any] }
         return (try? JSONSerialization.data(withJSONObject: list)) ?? Data("[]".utf8)
     }
 }

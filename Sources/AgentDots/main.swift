@@ -19,6 +19,7 @@ final class Controller: NSObject, NSApplicationDelegate {
     let ui = UIState()
     var panel: Panel!
     var server: Server?
+    var t3: T3Watcher?
     var hovering = false
     var collapseWork: DispatchWorkItem?
     var observer: Any?
@@ -42,6 +43,8 @@ final class Controller: NSObject, NSApplicationDelegate {
         do { server = try Server(port: UInt16(Hook.port), store: store) } catch {
             FileHandle.standardError.write(Data("agent-dots: \(error)\n".utf8)); exit(1)
         }
+
+        t3 = T3Watcher(store: store)
 
         observer = store.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.place(open: self?.panelOpen ?? false) }
@@ -95,12 +98,16 @@ func snapshot(path: String, open: Bool) {
     let store = Store()
     store.muted = true
     let samples: [(String, AgentState, String, String?)] = [
-        ("a", .working, "OpenCode · Agent Notification Sounds and Overlay Status Indicator Ideas", "T3 Code (Beta)"),
+        ("t3:a", .working, "OpenCode · Agent Notification Sounds and Overlay Status Indicator Ideas", "T3 Code (Beta)"),
         ("b", .done, "Claude · token-tracker", "Terminal"),
-        ("c", .attention, "OpenCode · Experiment Design: Proximal vs. Distal Control", "T3 Code (Beta)"),
+        ("t3:c", .attention, "OpenCode · Experiment Design: Proximal vs. Distal Control", "T3 Code (Beta)"),
         ("d", .error, "Claude · personal-website", "Claude"),
     ]
-    for (id, st, label, app) in samples { store.apply(AgentEvent(session: id, state: st, label: label, app: app)) }
+    for (id, st, label, app) in samples {
+        var ev = AgentEvent(session: id, state: st, label: label, app: app)
+        if app == "T3 Code (Beta)" { ev.project = id == "t3:a" ? "token-tracker" : "proximal-power" }
+        store.apply(ev)
+    }
     let ui = UIState()
     ui.open = open
     ui.snapshot = true

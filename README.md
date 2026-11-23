@@ -1,7 +1,12 @@
 # agent-dots
 
 A native macOS (SwiftUI) slim always-on-top rail on the right edge of your Mac showing what your AI coding agents are doing.
-Hover to slide out details; click a session to open its app.
+Hover to slide out details; click a session to open it.
+
+Sources:
+- **T3 Code**: read from T3's own state (`~/.t3/userdata/statev2.sqlite`, read-only), so every T3 thread shows whatever its provider, and a click opens that exact thread.
+- **Claude Code** outside T3: hooks in `~/.claude/settings.json` calling `agent-dots hook claude`.
+- **OpenCode** outside T3: `integrations/opencode/agent-dots.js`, linked into `~/.config/opencode/plugins/`.
 
 | Mark | State |
 |---|---|

@@ -38,6 +38,8 @@ enum Hook {
     }
 
     static func run(_ kind: String, _ rest: [String]) {
+        // Agents running inside T3 Code are read from T3's own state instead.
+        if hostApp() == "T3 Code (Beta)" { return }
         switch kind {
         case "claude":
             let data = FileHandle.standardInput.readDataToEndOfFile()

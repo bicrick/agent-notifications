@@ -102,7 +102,7 @@ struct Row: View {
     private func meta(now: Date) -> some View {
         var text = Text(session.state.title).foregroundColor(Color(nsColor: session.state.color))
         text = text + Text("  ·  \(ago(now.timeIntervalSince(session.since)))")
-        if let src = session.source { text = text + Text("  ·  \(src)") }
+        if let d = session.detail { text = text + Text("  ·  \(d)") }
         return text
             .font(.system(size: 10.5))
             .foregroundStyle(.secondary)

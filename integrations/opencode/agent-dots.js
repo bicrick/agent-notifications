@@ -32,17 +32,29 @@ function send(ev) {
 
 export const AgentDots = async ({ directory }) => {
   const app = hostApp();
+  // Agent Dots reads T3 Code's threads from T3 itself (titles, approvals, deep links).
+  if (app === 'T3 Code (Beta)') return {};
   const dir = path.basename(directory || '') || 'opencode';
   const sessions = new Map(); // id -> { title, child }
   const seen = new Set();
+  const last = new Map(); // id -> last event, re-sent so an overlay restart recovers
 
   const set = (id, state) => {
     if (!id) return;
     const s = sessions.get(id);
     if (s?.child) return; // subagents roll up into their parent
     const title = s?.title && !/^New session/i.test(s.title) ? s.title : dir;
-    send({ session: `opencode:${id}`, state, label: `OpenCode · ${title}`, app });
+    const ev = { session: `opencode:${id}`, state, label: `OpenCode · ${title}`, app };
+    last.set(id, ev);
+    send(ev);
   };
+
+  setInterval(() => {
+    for (const [id, ev] of last) {
+      if (ev.state === 'working' || ev.state === 'attention') send(ev);
+      else last.delete(id); // finished: say it once, don't resurrect it after a click
+    }
+  }, 20_000).unref?.();
 
   return {
     event: async ({ event }) => {
