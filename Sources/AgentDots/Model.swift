@@ -97,8 +97,8 @@ final class Store: ObservableObject {
             sessions.removeAll { $0.id == ev.session }
             return true
         }
-        // A session that ended has nothing left to tell you.
-        if ev.state == .idle {
+        // A hook session that ended has nothing left to tell you. (T3 threads stay, dormant.)
+        if ev.state == .idle && !ev.session.hasPrefix("t3:") {
             sessions.removeAll { $0.id == ev.session }
             return true
         }
@@ -117,8 +117,7 @@ final class Store: ObservableObject {
             if changed && !quiet { Sounds.play(ev.state, muted: muted) }
         } else {
             let since = ev.since ?? now
-            if let d = dismissed[ev.session], abs(d.timeIntervalSince(since)) < 1 { return true }
-            dismissed[ev.session] = nil
+            if let d = dismissed[ev.session], abs(d.timeIntervalSince(since)) < 1, ev.state != .idle { return true }
             sessions.append(Session(id: ev.session, label: ev.label ?? ev.session, state: ev.state,
                                     app: ev.app, project: ev.project, link: ev.link, updated: now, since: since))
             if !quiet { Sounds.play(ev.state, muted: muted) }
@@ -133,8 +132,13 @@ final class Store: ObservableObject {
         let stale = sessions.filter { $0.id.hasPrefix(prefix) && !ids.contains($0.id) }.map(\.id)
         if !stale.isEmpty { sessions.removeAll { stale.contains($0.id) } }
         for ev in events {
-            if let d = dismissed[ev.session], let since = ev.since, abs(d.timeIntervalSince(since)) < 1 { continue }
-            apply(ev, quiet: quiet)
+            var ev = ev
+            // A finished thread you clicked away settles to dormant rather than vanishing.
+            if let d = dismissed[ev.session], let since = ev.since, abs(d.timeIntervalSince(since)) < 1 {
+                guard ev.session.hasPrefix("t3:") else { continue }
+                ev.state = .idle
+            }
+            apply(ev, quiet: quiet || ev.state == .idle)
         }
     }
 
@@ -150,7 +154,11 @@ final class Store: ObservableObject {
         }
         if s.state.acknowledgeable {
             dismissed[id] = s.since
-            sessions.removeAll { $0.id == id }
+            if id.hasPrefix("t3:") {
+                if let i = sessions.firstIndex(where: { $0.id == id }) { sessions[i].state = .idle }
+            } else {
+                sessions.removeAll { $0.id == id }
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import SQLite3
 
 /// Mirrors T3 Code threads straight from T3's local state database, so every T3 agent shows
@@ -9,8 +9,10 @@ final class T3Watcher {
     private let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".t3/userdata")
     private var db: OpaquePointer?
     private var first = true
-    /// How long a finished thread stays on the rail if you don't click it.
+    /// How long a finished thread shows as Done/Failed before settling to idle.
     private let keepFinished: TimeInterval = 30 * 60
+    /// While T3 is open, show this many of its most recent threads (running ones always show).
+    static let limit = 10
 
     init(store: Store) {
         self.store = store
@@ -48,18 +50,26 @@ final class T3Watcher {
         LEFT JOIN projection_projects p ON p.project_id = t.project_id
         WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
           AND json_extract(t.payload_json, '$.lineage.parentThreadId') IS NULL
-          AND r.requested_at > ?
+        ORDER BY r.requested_at DESC
+        LIMIT 40
         """
 
+    private var t3Running: Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.t3tools.t3code" }
+    }
+
     private func poll() {
+        guard t3Running else {
+            store.sync(prefix: "t3:", [], quiet: true)
+            first = true
+            return
+        }
         guard open() else { return }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, Self.query, -1, &stmt, nil) == SQLITE_OK else {
             sqlite3_close(db); db = nil; return   // schema changed or file replaced: reopen next tick
         }
         defer { sqlite3_finalize(stmt) }
-        let cutoff = iso(Date().addingTimeInterval(-24 * 3600))
-        sqlite3_bind_text(stmt, 1, cutoff, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
 
         var events: [AgentEvent] = []
         let now = Date()
@@ -77,11 +87,11 @@ final class T3Watcher {
             case "waiting": state = .attention
             case "completed": state = .done; since = completed ?? since
             case "failed": state = .error; since = completed ?? since
-            default: continue  // interrupted / cancelled: nothing to report
+            default: state = .idle; since = completed ?? since  // interrupted / cancelled
             }
             if pending > 0 && state == .working { state = .attention }
-            if state == .done || state == .error {
-                if settled || now.timeIntervalSince(since) > keepFinished { continue }
+            if (state == .done || state == .error) && (settled || now.timeIntervalSince(since) > keepFinished) {
+                state = .idle
             }
 
             var ev = AgentEvent(session: "t3:\(id)", state: state,
@@ -91,7 +101,11 @@ final class T3Watcher {
             if let env = environmentID { ev.link = "t3code://threads/\(env)/\(id)" }
             events.append(ev)
         }
-        store.sync(prefix: "t3:", events, quiet: first)
+        // Live threads always show; dormant ones fill the rest, most recent first.
+        let live = events.filter { $0.state != .idle }
+        let dormant = events.filter { $0.state == .idle }.prefix(max(0, Self.limit - live.count))
+        let shown = Set((live + dormant).map(\.session))
+        store.sync(prefix: "t3:", events.filter { shown.contains($0.session) }, quiet: first)
         first = false
     }
 
