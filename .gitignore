@@ -1,10 +1,5 @@
-node_modules/
-dist/
-.DS_Store
-
-
-# Added by cargo
-
-/target
-snapshots/
 target/
+snapshots/
+.build/
+node_modules/
+.DS_Store
